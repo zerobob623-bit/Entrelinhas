@@ -13,6 +13,7 @@ import ReactMarkdown from 'react-markdown';
 const AVAILABLE_MODELS = [
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', provider: 'google', desc: 'Maior capacidade de empatia e análise (Google).' },
   { id: 'gemini-3.0-flash', name: 'Gemini 3.0 Flash', provider: 'google', desc: 'Rápido e preciso (Google).' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', desc: 'Mais rápido e eficiente (Google).' },
   { id: 'gpt-4o', name: 'ChatGPT-4o', provider: 'openai', desc: 'Modelo mais avançado e inteligente (OpenAI).' },
   { id: 'gpt-4o-mini', name: 'ChatGPT-4o Mini', provider: 'openai', desc: 'Ágil e eficiente (OpenAI).' },
 ];
@@ -42,7 +43,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('entrelinhas_gemini_key') || '');
   const [openAIApiKey, setOpenAIApiKey] = useState(() => localStorage.getItem('entrelinhas_openai_key') || '');
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('entrelinhas_model') || 'gemini-3.1-pro-preview');
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('entrelinhas_model_v2') || 'gemini-2.5-flash');
 
   useEffect(() => {
     localStorage.setItem('entrelinhas_gemini_key', geminiApiKey);
@@ -53,7 +54,7 @@ export default function App() {
   }, [openAIApiKey]);
 
   useEffect(() => {
-    localStorage.setItem('entrelinhas_model', selectedModel);
+    localStorage.setItem('entrelinhas_model_v2', selectedModel);
   }, [selectedModel]);
   
   const [inputPhrase, setInputPhrase] = useState('');
@@ -119,21 +120,29 @@ export default function App() {
         const apiKey = geminiApiKey || process.env.GEMINI_API_KEY;
         if (!apiKey) throw new Error('API Key do Gemini não configurada.');
         const client = new GoogleGenAI({ apiKey });
-        const response = await client.models.generateContent({
-          model: "gemini-3.1-flash-tts-preview",
-          contents: [{ parts: [{ text }] }],
-          config: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: 'Kore' }
+        let ttsModel = "gemini-2.5-flash";
+        if (!geminiApiKey) {
+          ttsModel = "gemini-3-flash-preview";
+        }
+        
+        try {
+          const response = await client.models.generateContent({
+            model: ttsModel,
+            contents: [{ parts: [{ text }] }],
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: 'Kore' }
+                }
               }
             }
+          });
+          
+          const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (!base64Audio) {
+            throw new Error('Sem áudio na resposta.');
           }
-        });
-        
-        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (base64Audio) {
           // PCM 16-bit 24000Hz decoding
           const binaryString = atob(base64Audio);
           const float32Data = new Float32Array(binaryString.length / 2);
@@ -151,8 +160,11 @@ export default function App() {
           source.connect(audioCtx.destination);
           source.onended = () => setIsPlayingAudio(false);
           source.start();
-        } else {
-          throw new Error('Sem áudio na resposta.');
+        } catch(apiErr: any) {
+             if (apiErr?.status === 403 || apiErr?.message?.includes('PERMISSION_DENIED') || apiErr?.message?.includes('403') || apiErr?.message?.includes('NOT_FOUND')) {
+                throw new Error('Sem permissão para este modelo ou versão de áudio. Por favor, adicione SUA PRÓPRIA API KEY na engrenagem de configurações.');
+             }
+             throw apiErr;
         }
       }
     } catch (err) {
@@ -190,6 +202,9 @@ export default function App() {
       });
       if (!res.ok) {
         const errData = await res.json();
+        if (errData.error?.code === 403) {
+          throw new Error('Erro 403: Sem permissão. (Verifique sua API KEY nas configurações).');
+        }
         throw new Error(errData.error?.message || 'Erro na API da OpenAI');
       }
       const data = await res.json();
@@ -201,15 +216,29 @@ export default function App() {
         throw new Error('Chave da API do Gemini não configurada.');
       }
       const client = new GoogleGenAI({ apiKey });
-      const response = await client.models.generateContent({
-        model: selectedModel,
-        contents: prompt,
-        config: {
-          systemInstruction,
-          temperature,
-        },
-      });
-      return response.text;
+      
+      let actualModel = selectedModel;
+      // Tratar os modelos para funcionar com a chave proxy do AI Studio se o usuário usar o padrão
+      if (!geminiApiKey && actualModel.startsWith('gemini')) {
+        actualModel = 'gemini-3-flash-preview';
+      }
+
+      try {
+        const response = await client.models.generateContent({
+          model: actualModel,
+          contents: prompt,
+          config: {
+            systemInstruction,
+            temperature,
+          },
+        });
+        return response.text;
+      } catch (apiErr: any) {
+         if (apiErr?.status === 403 || apiErr?.message?.includes('PERMISSION_DENIED') || apiErr?.message?.includes('403')) {
+          throw new Error('Sem permissão para este modelo. Por favor, adicione SUA PRÓPRIA API KEY na engrenagem de configurações.');
+         }
+         throw apiErr;
+      }
     }
   };
 
