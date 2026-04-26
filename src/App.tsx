@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react';
 import type { KeyboardEvent } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Sparkles, ArrowDown, Heart, Loader2, Settings, X, Key, Copy, Check, Volume2, Wand2 } from 'lucide-react';
+import { Sparkles, ArrowDown, Heart, Loader2, Settings, X, Key, Copy, Check, Volume2, Wand2, HeartPulse } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 
@@ -38,8 +38,31 @@ const COMMON_SITUATIONS = [
   "Sinto que ele não me prioriza. Nos finais de semana a prioridade é sempre o futebol e os amigos, e o que sobra de tempo fica pra mim. Quando falo disso, sou chamada de carente."
 ];
 
+const QUIZ_QUESTIONS = [
+  {
+    question: "No fim de semana, você prefere:",
+    options: ["Ficar em casa relaxando maratonando séries", "Sair e conhecer lugares novos/viajar", "Jantar com amigos íntimos", "Uma aventura na natureza ou esporte"]
+  },
+  {
+    question: "Quando surge um problema no relacionamento, como você reage?",
+    options: ["Tento resolver na hora conversando", "Preciso de um tempo sozinho(a) para pensar", "Fico irritado(a) rápido, mas depois relevo", "Evito o conflito ao máximo até não aguentar mais"]
+  },
+  {
+    question: "Qual dessas linguagens do amor é mais importante para você?",
+    options: ["Palavras de Afirmação", "Tempo de Qualidade", "Toque Físico ou Atos de Serviço", "Presentes e surpresas"]
+  },
+  {
+    question: "Como você lida com dinheiro e planejamento futuro?",
+    options: ["Sou super organizado(a) e guardo tudo que posso", "Gosto de viver o hoje e gasto com experiências", "Tento equilibrar, mas às vezes extrapolo", "Não ligo muito para dinheiro/deixo a vida me levar"]
+  },
+  {
+    question: "O que para você é um limite inegociável?",
+    options: ["Mentiras e traição de qualquer tipo", "Falta de apoio nos meus sonhos e carreira", "Desrespeito na forma de falar durante brigas", "Frieza emocional e desconexão"]
+  }
+];
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'traducao' | 'analise'>('traducao');
+  const [activeTab, setActiveTab] = useState<'traducao' | 'analise' | 'quiz'>('traducao');
   const [showSettings, setShowSettings] = useState(false);
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('entrelinhas_gemini_key') || '');
   const [openAIApiKey, setOpenAIApiKey] = useState(() => localStorage.getItem('entrelinhas_openai_key') || '');
@@ -67,6 +90,13 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+
+  // Quiz State
+  const [quizStarted, setQuizStarted] = useState(false);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [quizAnswers, setQuizAnswers] = useState<string[]>([]);
+  const [quizResult, setQuizResult] = useState('');
+  const [isGeneratingQuizResult, setIsGeneratingQuizResult] = useState(false);
 
   const handleCopy = async (text: string) => {
     try {
@@ -311,10 +341,63 @@ Mantenha o tom neutro, empático e focado na solução. Não tome partido e não
       e.preventDefault();
       if (activeTab === 'traducao') {
         handleTranslate();
-      } else {
+      } else if (activeTab === 'analise') {
         handleAnalyze();
       }
     }
+  };
+
+  const handleQuizOption = async (option: string) => {
+    const newAnswers = [...quizAnswers, option];
+    setQuizAnswers(newAnswers);
+
+    if (currentQuestionIndex < QUIZ_QUESTIONS.length - 1) {
+      setCurrentQuestionIndex(currentQuestionIndex + 1);
+    } else {
+      // Finished quiz
+      await evaluateQuiz(newAnswers);
+    }
+  };
+
+  const evaluateQuiz = async (answers: string[]) => {
+    setIsGeneratingQuizResult(true);
+    setError('');
+    
+    const prompt = QUIZ_QUESTIONS.map((q, i) => `Pergunta: ${q.question}\nResposta: ${answers[i]}`).join('\n\n');
+
+    try {
+      const text = await callAI(
+        prompt,
+        `Você é um especialista em perfis comportamentais e relacionamentos.
+Com base nas respostas do usuário a este quiz de 5 perguntas, crie uma análise divertida, mas profunda.
+Sua análise deve conter:
+1. **❤️ Seu Par Ideal:** Um título curto do tipo de pessoa ideal para o usuário. Inclua características principais e explique POR QUE dá certo.
+2. **❌ A Grande Cilada (Par Imperfeito):** Um título curto do tipo de pessoa que seria um desastre. Inclua características e explique POR QUE daria errado.
+3. **Resumo da sua Persona no Amor:** 2 parágrafos no máximo descrevendo o estilo de amar do usuário.
+
+Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engajante.`,
+        0.7
+      );
+
+      if (text) {
+        setQuizResult(text.trim());
+      } else {
+        setError('Não foi possível gerar seu resultado agora. Tente novamente.');
+      }
+    } catch (err: any) {
+       console.error('Quiz error:', err);
+       setError(err.message || 'Ocorreu um erro ao conectar com a inteligência artificial.');
+    } finally {
+      setIsGeneratingQuizResult(false);
+    }
+  };
+
+  const resetQuiz = () => {
+    setQuizStarted(false);
+    setCurrentQuestionIndex(0);
+    setQuizAnswers([]);
+    setQuizResult('');
+    setIsGeneratingQuizResult(false);
   };
 
   return (
@@ -329,10 +412,12 @@ Mantenha o tom neutro, empático e focado na solução. Não tome partido e não
               Entrelinhas
             </h1>
           </div>
-          <p className="text-[#666] text-lg font-semibold tracking-wide max-w-lg mt-4 h-14">
+          <p className="text-[#666] text-lg font-semibold tracking-wide max-w-xl mt-4 min-h-[56px]">
             {activeTab === 'traducao' 
               ? 'Transforme palavras ditas no calor da emoção naquilo que você realmente queria dizer.'
-              : 'Descreva uma situação ou briga e receba uma análise racional, imparcial e construtiva.'}
+              : activeTab === 'analise'
+              ? 'Descreva uma situação ou briga e receba uma análise racional, imparcial e construtiva.'
+              : 'Responda o quiz para descobrir seu par ideal e as maiores ciladas para o seu estilo de amar.'}
           </p>
         </div>
         <button 
@@ -345,7 +430,7 @@ Mantenha o tom neutro, empático e focado na solução. Não tome partido e não
       </header>
 
       <main className="flex-1 flex flex-col gap-6">
-        <div className="flex gap-4 mb-4">
+        <div className="flex flex-wrap gap-4 mb-4">
           <button
             onClick={() => setActiveTab('traducao')}
             className={`px-6 py-2 rounded-full font-bold tracking-wider text-sm transition-all ${
@@ -365,6 +450,16 @@ Mantenha o tom neutro, empático e focado na solução. Não tome partido e não
             }`}
           >
             Análise de Relacionamento
+          </button>
+          <button
+            onClick={() => setActiveTab('quiz')}
+            className={`px-6 py-2 rounded-full font-bold tracking-wider text-sm transition-all ${
+              activeTab === 'quiz' 
+                ? 'bg-[#FF6B6B] text-white shadow-md' 
+                : 'bg-white text-[#2D2D2D] border-2 border-[#2D2D2D] hover:bg-gray-50'
+            }`}
+          >
+            Quiz Perfil Ideal
           </button>
         </div>
 
@@ -413,7 +508,7 @@ Mantenha o tom neutro, empático e focado na solução. Não tome partido e não
                 </button>
               </div>
             </>
-          ) : (
+          ) : activeTab === 'analise' ? (
             <>
               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-4">
                 <label htmlFor="context" className="inline-block px-4 py-1 bg-[#FFD93D] rounded-full text-xs font-bold uppercase tracking-wider w-fit">
@@ -457,7 +552,85 @@ Mantenha o tom neutro, empático e focado na solução. Não tome partido e não
                 </button>
               </div>
             </>
-          )}
+          ) : activeTab === 'quiz' ? (
+             <div className="flex flex-col h-full min-h-[300px]">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-4">
+                  <label className="inline-block px-4 py-1 bg-[#6BCB77] text-white rounded-full text-xs font-bold uppercase tracking-wider w-fit">
+                    Descubra seu Par Ideal & A Grande Cilada
+                  </label>
+                </div>
+
+                {!quizStarted && !quizResult && !isGeneratingQuizResult ? (
+                  <div className="flex flex-col items-center justify-center flex-1 text-center space-y-6 py-6">
+                    <h3 className="text-2xl md:text-3xl font-extrabold text-[#2D2D2D]">Pronto para descobrir o mapa da sua cara metade?</h3>
+                    <p className="text-lg text-[#666] max-w-lg font-medium">
+                      Responda a 5 perguntinhas rápidas sobre você e vamos descobrir com quem você daria <strong>muito certo</strong> e qual personalidade seria um verdadeiro <strong>desastre</strong>.
+                    </p>
+                    <button
+                      onClick={() => setQuizStarted(true)}
+                      className="w-full sm:w-auto bg-[#6BCB77] text-white px-8 py-4 sm:py-5 rounded-2xl font-bold text-lg sm:text-xl shadow-lg hover:brightness-105 transition-all flex justify-center items-center gap-2"
+                    >
+                      <Heart className="w-6 h-6" />
+                      Começar o Quiz
+                    </button>
+                  </div>
+                ) : isGeneratingQuizResult ? (
+                  <div className="flex flex-col items-center justify-center flex-1 space-y-4 py-12">
+                    <Loader2 className="w-12 h-12 text-[#6BCB77] animate-spin" />
+                    <p className="text-xl font-bold text-[#2D2D2D]">Lendo o seu perfil e o mapa humano...</p>
+                  </div>
+                ) : quizResult ? (
+                  <div className="flex flex-col flex-1">
+                     <div className="prose prose-lg text-[#2D2D2D] relative z-10 font-medium leading-relaxed max-w-none prose-headings:font-extrabold prose-headings:mb-4 prose-p:mb-6 prose-strong:font-extrabold prose-strong:bg-[#6BCB77]/20 prose-strong:px-1 prose-strong:rounded mb-6">
+                        <ReactMarkdown>
+                          {quizResult}
+                        </ReactMarkdown>
+                     </div>
+                     <div className="flex items-center gap-3 relative z-10 mt-auto pt-4 border-t-2 border-[#2D2D2D]/10 w-full flex-wrap">
+                        <button
+                          onClick={() => handleCopy(quizResult)}
+                          className="flex items-center gap-2 bg-[#2D2D2D]/10 hover:bg-[#2D2D2D]/20 text-[#2D2D2D] px-4 py-2 rounded-xl text-sm font-bold transition-all"
+                        >
+                          {copiedText ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                          {copiedText ? 'Copiado!' : 'Copiar'}
+                        </button>
+                        <button
+                          onClick={() => playAudio(quizResult)}
+                          disabled={isPlayingAudio}
+                          className="flex items-center gap-2 bg-[#2D2D2D]/10 hover:bg-[#2D2D2D]/20 text-[#2D2D2D] px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isPlayingAudio ? <Loader2 className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
+                          {isPlayingAudio ? 'Reproduzindo...' : 'Ouvir'}
+                        </button>
+                        <button
+                          onClick={resetQuiz}
+                          className="ml-auto flex items-center gap-2 bg-[#2D2D2D] hover:bg-[#444] text-white px-4 py-2 rounded-xl text-sm font-bold transition-all"
+                        >
+                          Refazer Quiz
+                        </button>
+                     </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col flex-1 space-y-6">
+                    <p className="text-[#6BCB77] font-bold text-sm uppercase tracking-wider">Pergunta {currentQuestionIndex + 1} de {QUIZ_QUESTIONS.length}</p>
+                    <h3 className="text-2xl md:text-3xl font-extrabold text-[#2D2D2D] leading-tight">
+                      {QUIZ_QUESTIONS[currentQuestionIndex].question}
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
+                      {QUIZ_QUESTIONS[currentQuestionIndex].options.map((option, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => handleQuizOption(option)}
+                          className="text-left bg-white border-4 border-[#2D2D2D]/10 hover:border-[#6BCB77] text-[#2D2D2D] font-bold p-6 rounded-2xl transition-all h-full text-lg shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#6BCB77] hover:-translate-y-1"
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+             </div>
+          ) : null}
         </div>
 
         <AnimatePresence mode="wait">
