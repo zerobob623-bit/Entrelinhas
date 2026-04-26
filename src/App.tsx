@@ -98,6 +98,29 @@ export default function App() {
   const [quizResult, setQuizResult] = useState('');
   const [isGeneratingQuizResult, setIsGeneratingQuizResult] = useState(false);
 
+  // New Game State
+  const [gameMode, setGameMode] = useState<'' | 'par_ideal' | 'trivia' | 'tres_pistas' | 'casal'>('');
+  const [player1, setPlayer1] = useState('');
+  const [player2, setPlayer2] = useState('');
+  const [score1, setScore1] = useState(0);
+  const [score2, setScore2] = useState(0);
+  const [currentPlayer, setCurrentPlayer] = useState<1 | 2>(1);
+  const [gameQuestions, setGameQuestions] = useState<any[]>([]);
+  const [currentGameRound, setCurrentGameRound] = useState(0);
+  const [gameStep, setGameStep] = useState<'setup' | 'playing' | 'finished'>('setup');
+  const [isGeneratingGame, setIsGeneratingGame] = useState(false);
+  const [gameFeedback, setGameFeedback] = useState('');
+  const [gameInput, setGameInput] = useState('');
+  
+  const [scorePlateia, setScorePlateia] = useState(0);
+  const [currentClueIndex, setCurrentClueIndex] = useState(0);
+  const [isPlateiaTurn, setIsPlateiaTurn] = useState(false);
+  const [wrongFeedback, setWrongFeedback] = useState('');
+  
+  const [casalAnswers, setCasalAnswers] = useState<{question: string, chosen: string}[]>([]);
+  const [casalAnalysis, setCasalAnalysis] = useState('');
+  const [isGeneratingAnalysis, setIsGeneratingAnalysis] = useState(false);
+
   const handleCopy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -398,6 +421,162 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
     setQuizAnswers([]);
     setQuizResult('');
     setIsGeneratingQuizResult(false);
+    setGameMode('');
+    setGameStep('setup');
+  };
+
+  const startGame = async (mode: 'trivia' | 'tres_pistas' | 'casal') => {
+    if (!player1 || !player2) {
+      setError('Por favor, preencha o nome dos dois jogadores.');
+      return;
+    }
+    setGameMode(mode);
+    setScore1(0);
+    setScore2(0);
+    setScorePlateia(0);
+    setCurrentPlayer(1);
+    setCurrentClueIndex(0);
+    setIsPlateiaTurn(false);
+    setWrongFeedback('');
+    setCurrentGameRound(0);
+    setGameQuestions([]);
+    setIsGeneratingGame(true);
+    setGameFeedback('');
+    setGameInput('');
+    setError('');
+    
+    setCasalAnswers([]);
+    setCasalAnalysis('');
+    setIsGeneratingAnalysis(false);
+
+    let prompt = '';
+    if (mode === 'trivia') {
+       prompt = `Gere 5 perguntas INÉDITAS E ALEATÓRIAS de conhecimentos gerais estilo trivial pursuit em JSON. Formato obrigatório: [{"question": "...", "options": ["A", "B", "C", "D"], "answer": "Resposta exata"}]`;
+    } else if (mode === 'tres_pistas') {
+       prompt = `Gere 6 desafios ALEATÓRIOS E INÉDITOS de três pistas sobre objetos, pessoas, animais ou lugares. Varie bastante os temas para que nunca sejam repetidos de um jogo para o outro. Formato obrigatório em JSON: [{"clues": ["pista1", "pista2", "pista3"], "answer": "Resposta exata"}]`;
+    } else if (mode === 'casal') {
+       prompt = `Gere 12 perguntas divertidas INÉDITAS sobre o casal ${player1} e ${player2}. TODAS as 12 perguntas DEVEM ser obrigatoriamente no formato comparativo "Quem é mais...?", "Quem faz mais...?", "Qual dos dois...?", "Quem é mais provável que...". Teste o quanto eles se conhecem! Retorne em JSON. Formato obrigatório: [{"question": "..."}]`;
+    }
+
+    try {
+      const text = await callAI(
+        prompt, 
+        'Você é um gerador de jogos. Responda APENAS com um array JSON válido. Sem formatação markdown, sem blocos de código ```json, apenas o array JSON puro e cru empezando com [ e terminando com ].', 
+        0.8
+      );
+      if (text) {
+         let cleanJson = text;
+         if (text.startsWith('```')) {
+            cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+         }
+         const parsed = JSON.parse(cleanJson);
+         setGameQuestions(parsed);
+         setGameStep('playing');
+      } else {
+        throw new Error('Falha ao gerar perguntas.');
+      }
+    } catch(err: any) {
+      setError('Erro ao criar o jogo: Verifique as configurações da API ou tente novamente.');
+      setGameStep('setup');
+      setGameMode('');
+    } finally {
+      setIsGeneratingGame(false);
+    }
+  };
+
+  const nextGameRound = () => {
+    if (currentGameRound < gameQuestions.length - 1) {
+       setCurrentGameRound(r => r + 1);
+       setCurrentPlayer(p => p === 1 ? 2 : 1);
+       setGameFeedback('');
+       setGameInput('');
+       setCurrentClueIndex(0);
+       setIsPlateiaTurn(false);
+       setWrongFeedback('');
+    } else {
+       setGameStep('finished');
+    }
+  };
+
+  const checkAnswer = (selectedOpt?: string, isCorrectOverride?: boolean) => {
+     if (isGeneratingGame || gameStep !== 'playing') return;
+
+     let isCorrect = false;
+     let correctAnswer = '';
+     const q = gameQuestions[currentGameRound];
+
+     if (isCorrectOverride !== undefined) {
+         isCorrect = isCorrectOverride;
+         correctAnswer = q.answer;
+     } else if (gameMode === 'trivia') {
+        isCorrect = (selectedOpt === q.answer);
+        correctAnswer = q.answer;
+     } else if (gameMode === 'tres_pistas') {
+        const checkStr = selectedOpt || gameInput;
+        const normalize = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+        isCorrect = normalize(checkStr) === normalize(q.answer);
+        correctAnswer = q.answer;
+     }
+
+     if (isCorrect) {
+       let pts = 1;
+       if (gameMode === 'tres_pistas') {
+           pts = 3 - currentClueIndex;
+           setGameFeedback(`🎉 Parabéns! <strong>${currentPlayer === 1 ? player1 : player2}</strong> acertou e ganhou ${pts} ${pts > 1 ? 'pontos' : 'ponto'}! A resposta era: ${correctAnswer}`);
+       } else {
+           setGameFeedback('🎉 Parabéns, você acertou!');
+       }
+       if (currentPlayer === 1) setScore1(s => s + pts);
+       else setScore2(s => s + pts);
+     } else {
+       if (gameMode === 'tres_pistas') {
+           setGameInput('');
+           if (currentClueIndex < 2) {
+               setWrongFeedback('❌ Errou! Passando a vez...');
+               setTimeout(() => setWrongFeedback(''), 2000);
+               setCurrentClueIndex(c => c + 1);
+               setCurrentPlayer(p => p === 1 ? 2 : 1);
+           } else {
+               setIsPlateiaTurn(true);
+           }
+       } else {
+           setGameFeedback(`❌ Que pena, você errou. A resposta era: ${correctAnswer}`);
+       }
+     }
+  };
+
+  const handlePlateia = (acertou: boolean) => {
+      if (acertou) {
+          setScorePlateia(s => s + 3);
+          setGameFeedback(`🎉 A Plateia acertou a resposta: "<strong>${gameQuestions[currentGameRound].answer}</strong>" e ganhou 3 pontos!`);
+      } else {
+          setGameFeedback(`❌ Ninguém acertou! A resposta era: "<strong>${gameQuestions[currentGameRound].answer}</strong>"`);
+      }
+  };
+
+  const handleCasalScore = async (chosenPlayerIndex: 1 | 2) => {
+      const chosenPlayerName = chosenPlayerIndex === 1 ? player1 : player2;
+      const newAnswers = [...casalAnswers, { question: gameQuestions[currentGameRound].question, chosen: chosenPlayerName }];
+      setCasalAnswers(newAnswers);
+
+      if (chosenPlayerIndex === 1) setScore1(s => s + 1);
+      else setScore2(s => s + 1);
+
+      if (currentGameRound < gameQuestions.length - 1) {
+         setCurrentGameRound(r => r + 1);
+      } else {
+         setGameStep('finished');
+         setIsGeneratingAnalysis(true);
+         try {
+            const prompt = `Faça uma análise bem humorada do casal ${player1} e ${player2} baseada nas respostas do jogo "Quem é mais?".\n\nAbaixo estão as perguntas e quem foi eleito em cada uma:\n${newAnswers.map(a => `- ${a.question} R: ${a.chosen}`).join('\n')}\n\nFaça um texto contínuo, curto e direto, apontando em tom humorado quem levou a pior, os pontos fortes/engraçados, quem é mais positivo e mais negativo/problemático na relação. Utilize Markdown para formatar (negrito, etc) e use emojis. Não seja professoral, seja divertido!`;
+            const analysis = await callAI(prompt, 'Você é um terapeuta de casais humorista e sincero.', 0.8);
+            setCasalAnalysis(analysis || 'Não foi possível gerar a análise.');
+         } catch(e) {
+            setCasalAnalysis('Erro ao gerar a análise.');
+         } finally {
+            setIsGeneratingAnalysis(false);
+         }
+      }
   };
 
   return (
@@ -459,7 +638,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                 : 'bg-white text-[#2D2D2D] border-2 border-[#2D2D2D] hover:bg-gray-50'
             }`}
           >
-            Quiz Perfil Ideal
+            Quiz/Jogos
           </button>
         </div>
 
@@ -554,10 +733,55 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
             </>
           ) : activeTab === 'quiz' ? (
              <div className="flex flex-col h-full min-h-[300px]">
+               {gameMode === '' ? (
+                 <div className="flex flex-col items-center justify-center flex-1 space-y-8 py-6">
+                    <h3 className="text-2xl md:text-3xl font-extrabold text-[#2D2D2D]">Escolha seu Quiz ou Desafio!</h3>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
+                       <button
+                         onClick={() => setGameMode('par_ideal')}
+                         className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#FF6B6B] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#FF6B6B] hover:-translate-y-1"
+                       >
+                          <Heart className="w-8 h-8 text-[#FF6B6B] mb-2" />
+                          <span className="font-bold text-lg">Par Ideal</span>
+                          <span className="text-sm text-[#666] text-center mt-2">Quiz para descobrir seu perfil amoroso e quem seria uma cilada.</span>
+                       </button>
+
+                       <button
+                         onClick={() => setGameStep('setup') || setGameMode('trivia')}
+                         className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#4D96FF] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#4D96FF] hover:-translate-y-1"
+                       >
+                          <Wand2 className="w-8 h-8 text-[#4D96FF] mb-2" />
+                          <span className="font-bold text-lg">Conhecimentos Gerais</span>
+                          <span className="text-sm text-[#666] text-center mt-2">Jogue contra alguém para ver quem sabe mais.</span>
+                       </button>
+
+                       <button
+                         onClick={() => setGameStep('setup') || setGameMode('tres_pistas')}
+                         className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#FFD93D] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#FFD93D] hover:-translate-y-1"
+                       >
+                          <Sparkles className="w-8 h-8 text-[#FFD93D] mb-2" />
+                          <span className="font-bold text-lg">Jogo das Três Pistas</span>
+                          <span className="text-sm text-[#666] text-center mt-2">Tente adivinhar a palavra com as dicas!</span>
+                       </button>
+
+                       <button
+                         onClick={() => setGameStep('setup') || setGameMode('casal')}
+                         className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#6BCB77] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#6BCB77] hover:-translate-y-1"
+                       >
+                          <HeartPulse className="w-8 h-8 text-[#6BCB77] mb-2" />
+                          <span className="font-bold text-lg">12 Perguntas (Casal)</span>
+                          <span className="text-sm text-[#666] text-center mt-2">Testem o quanto vocês se conhecem de verdade.</span>
+                       </button>
+                    </div>
+                 </div>
+               ) : gameMode === 'par_ideal' ? (
+                 <>
                 <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-4">
                   <label className="inline-block px-4 py-1 bg-[#6BCB77] text-white rounded-full text-xs font-bold uppercase tracking-wider w-fit">
                     Descubra seu Par Ideal & A Grande Cilada
                   </label>
+                  <button onClick={resetQuiz} className="text-xs font-bold text-[#6BCB77] hover:bg-gray-100 px-3 py-1.5 rounded-full transition-colors">Voltar</button>
                 </div>
 
                 {!quizStarted && !quizResult && !isGeneratingQuizResult ? (
@@ -603,7 +827,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                           {isPlayingAudio ? 'Reproduzindo...' : 'Ouvir'}
                         </button>
                         <button
-                          onClick={resetQuiz}
+                          onClick={() => { setQuizResult(''); setQuizStarted(false); setCurrentQuestionIndex(0); setQuizAnswers([]); }}
                           className="ml-auto flex items-center gap-2 bg-[#2D2D2D] hover:bg-[#444] text-white px-4 py-2 rounded-xl text-sm font-bold transition-all"
                         >
                           Refazer Quiz
@@ -629,6 +853,193 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                     </div>
                   </div>
                 )}
+                 </>
+               ) : (
+                 <div className="flex flex-col h-full flex-1 w-full">
+                    <div className="flex justify-between items-center mb-6 border-b-2 border-gray-100 pb-4">
+                      <h2 className="text-xl font-extrabold uppercase text-[#4D96FF]">
+                        {gameMode === 'trivia' && 'Conhecimentos Gerais'}
+                        {gameMode === 'tres_pistas' && 'Jogo das Três Pistas'}
+                        {gameMode === 'casal' && 'Teste de Casal'}
+                      </h2>
+                      <button onClick={resetQuiz} className="text-sm font-bold text-gray-500 hover:text-black">
+                         ← Voltar Menu
+                      </button>
+                    </div>
+                    
+                    {gameStep === 'setup' ? (
+                       <div className="flex justify-center flex-col items-center w-full px-6 py-4 relative gap-6 text-center">
+                          <p className="text-lg font-bold">Quem vai jogar?</p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-lg">
+                             <input type="text" value={player1} onChange={e => setPlayer1(e.target.value)} placeholder="Jogador 1" className="bg-gray-100 border-2 border-transparent focus:border-[#4D96FF] p-4 font-bold rounded-xl text-center outline-none transition-all placeholder:font-medium text-[#2D2D2D]" />
+                             <input type="text" value={player2} onChange={e => setPlayer2(e.target.value)} placeholder="Jogador 2" className="bg-gray-100 border-2 border-transparent focus:border-[#4D96FF] p-4 font-bold rounded-xl text-center outline-none transition-all placeholder:font-medium text-[#2D2D2D]" />
+                          </div>
+                          <button
+                            onClick={() => startGame(gameMode as any)}
+                            disabled={!player1 || !player2 || isGeneratingGame}
+                            className="bg-[#4D96FF] text-white px-8 py-4 rounded-xl font-bold flex items-center justify-center min-w-[200px] disabled:opacity-50"
+                          >
+                             {isGeneratingGame ? <Loader2 className="w-6 h-6 animate-spin" /> : 'Começar!'}
+                          </button>
+                       </div>
+                    ) : gameStep === 'playing' ? (
+                       <div className="flex flex-col w-full h-full relative">
+                          <div className={`flex justify-between items-center mb-8 px-4 bg-gray-50 p-4 rounded-2xl w-full ${gameMode === 'tres_pistas' ? 'max-w-2xl' : 'max-w-md'} mx-auto shadow-sm border border-gray-100`}>
+                             <div className={`font-bold p-2 px-4 rounded-lg flex-1 text-center ${currentPlayer === 1 ? 'bg-[#4D96FF] text-white shadow-md' : 'text-gray-500'}`}>
+                                {player1} <span className="ml-2 bg-black/10 px-2 rounded-full">{score1}</span>
+                             </div>
+                             <div className="font-extrabold text-[#2D2D2D] opacity-40 mx-4">VS</div>
+                             <div className={`font-bold p-2 px-4 rounded-lg flex-1 text-center ${currentPlayer === 2 ? 'bg-[#FF6B6B] text-white shadow-md' : 'text-gray-500'}`}>
+                                {player2} <span className="ml-2 bg-black/10 px-2 rounded-full">{score2}</span>
+                             </div>
+                             {gameMode === 'tres_pistas' && (
+                                <>
+                                   <div className="font-extrabold text-[#2D2D2D] opacity-40 mx-4">VS</div>
+                                   <div className={`font-bold p-2 px-4 rounded-lg flex-1 text-center ${isPlateiaTurn ? 'bg-[#FFD93D] text-[#2D2D2D] shadow-md border-2 border-transparent' : 'text-amber-700 bg-amber-50 border-2 border-amber-200'}`}>
+                                      Plateia <span className={`ml-2 px-2 rounded-full ${isPlateiaTurn ? 'bg-black/10' : 'bg-white'}`}>{scorePlateia}</span>
+                                   </div>
+                                </>
+                             )}
+                          </div>
+                          
+                          <div className="flex flex-col text-center space-y-6">
+                             <span className="text-[#4D96FF] font-bold text-sm tracking-widest uppercase">Pergunta {currentGameRound + 1} de {gameQuestions.length}</span>
+                             
+                             {gameMode !== 'tres_pistas' && (
+                                <p className="text-2xl font-extrabold pb-4 max-w-2xl mx-auto">
+                                  {gameQuestions[currentGameRound].question}
+                                </p>
+                             )}
+                             
+                             {gameFeedback ? (
+                                <div className="space-y-6 py-6 pb-0">
+                                   <p className="text-xl font-bold" dangerouslySetInnerHTML={{__html: gameFeedback}} />
+                                   <button onClick={nextGameRound} className="mx-auto block bg-black text-white px-8 py-3 rounded-full font-bold hover:scale-105 transition-all">Próxima Rodada →</button>
+                                </div>
+                             ) : gameMode === 'trivia' ? (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-8 w-full max-w-2xl mx-auto">
+                                  {gameQuestions[currentGameRound].options?.map((opt: string) => (
+                                     <button key={opt} onClick={() => checkAnswer(opt)} className="bg-white border-2 border-gray-200 p-4 rounded-xl font-bold hover:border-[#4D96FF] transition-all">
+                                        {opt}
+                                     </button>
+                                  ))}
+                                </div>
+                             ) : gameMode === 'tres_pistas' ? (
+                                <div className="flex flex-col gap-4 mt-4 w-full max-w-lg mx-auto">
+                                   {isPlateiaTurn ? (
+                                       <div className="flex flex-col items-center gap-6 p-6 bg-[#FFD93D]/20 rounded-2xl border-4 border-[#FFD93D] mt-2">
+                                          <p className="text-xl font-bold">Nenhum dos dois acertou!</p>
+                                          <p className="text-lg">Agora é a vez da <span className="font-extrabold text-2xl uppercase text-amber-500 drop-shadow-sm">Plateia</span> ✨</p>
+                                          <div className="flex flex-col sm:flex-row gap-4">
+                                              <button onClick={() => handlePlateia(true)} className="bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-xl font-bold transition-colors">A Plateia Acertou (+3 pts)</button>
+                                              <button onClick={() => handlePlateia(false)} className="bg-red-500 hover:bg-red-600 text-white px-6 py-3 rounded-xl font-bold transition-colors">Ninguém na Plateia Acertou</button>
+                                          </div>
+                                       </div>
+                                   ) : (
+                                       <div className="flex flex-col items-center gap-4 w-full">
+                                          <div className="flex gap-2 w-full justify-center flex-wrap mb-2">
+                                             <span className={`px-4 py-2 rounded-full text-sm font-bold ${currentClueIndex >= 0 ? 'bg-amber-100 border-2 border-amber-400 text-amber-700' : 'bg-gray-100 text-gray-400 border-2 border-transparent'}`}>1ª Pista (3pts)</span>
+                                             <span className={`px-4 py-2 rounded-full text-sm font-bold ${currentClueIndex >= 1 ? 'bg-amber-100 border-2 border-amber-400 text-amber-700' : 'bg-gray-100 text-gray-400 border-2 border-transparent'}`}>2ª Pista (2pts)</span>
+                                             <span className={`px-4 py-2 rounded-full text-sm font-bold ${currentClueIndex >= 2 ? 'bg-amber-100 border-2 border-amber-400 text-amber-700' : 'bg-gray-100 text-gray-400 border-2 border-transparent'}`}>3ª Pista (1pt)</span>
+                                          </div>
+                                          
+                                          <div className="p-6 bg-white border-2 border-gray-100 rounded-xl shadow-sm w-full text-center space-y-4 relative min-h-[150px] flex flex-col justify-center">
+                                              {gameQuestions[currentGameRound].clues?.slice(0, currentClueIndex + 1).map((clue: string, idx: number) => (
+                                                  <p key={idx} className={`text-xl sm:text-2xl font-extrabold ${idx === currentClueIndex ? 'text-[#2D2D2D]' : 'text-gray-400 text-lg sm:text-xl'}`}>{clue}</p>
+                                              ))}
+                                          </div>
+                                          
+                                          <div className="h-6">
+                                             {wrongFeedback && <p className="text-red-500 font-bold animate-bounce">{wrongFeedback}</p>}
+                                          </div>
+
+                                          <p className="font-bold my-2 text-lg">Vez de responder: <span className={currentPlayer === 1 ? 'text-[#4D96FF] border-b-2 border-[#4D96FF]' : 'text-[#FF6B6B] border-b-2 border-[#FF6B6B]'}>{currentPlayer === 1 ? player1 : player2}</span></p>
+                                          
+                                          <div className="flex flex-col items-center gap-2 mt-2 mb-4 p-4 border-4 border-dashed border-gray-200 bg-gray-50 rounded-2xl w-full">
+                                             <p className="text-xs text-gray-500 uppercase tracking-widest font-extrabold text-center">Resposta (Apenas para o Mestre)</p>
+                                             <p className="text-xl md:text-2xl font-black text-[#2D2D2D] uppercase tracking-wide bg-white px-6 py-2 rounded-xl border border-gray-100 shadow-sm text-center">{gameQuestions[currentGameRound].answer}</p>
+                                          </div>
+
+                                          <div className="flex w-full flex-col sm:flex-row gap-4 mt-2">
+                                             <button onClick={() => checkAnswer(undefined, true)} className="flex-1 bg-[#6BCB77] text-white px-4 py-4 rounded-xl font-bold hover:brightness-105 hover:-translate-y-0.5 transition-all shadow-[0px_4px_0px_0px_rgba(0,0,0,0.1)] text-lg">👍 Acertou</button>
+                                             <button onClick={() => checkAnswer(undefined, false)} className="flex-1 bg-[#FF6B6B] text-white px-4 py-4 rounded-xl font-bold hover:brightness-105 hover:-translate-y-0.5 transition-all shadow-[0px_4px_0px_0px_rgba(0,0,0,0.1)] text-lg">👎 Errou</button>
+                                          </div>
+                                       </div>
+                                   )}
+                                </div>
+                             ) : (
+                                <div className="flex w-full flex-col sm:flex-row gap-4 mt-8">
+                                   <button onClick={() => handleCasalScore(1)} className="flex-1 bg-[#4D96FF] text-white px-6 py-6 rounded-xl font-black hover:brightness-105 hover:-translate-y-1 shadow-[0px_4px_0px_0px_rgba(0,0,0,0.1)] transition-all text-xl">{player1}</button>
+                                   <button onClick={() => handleCasalScore(2)} className="flex-1 bg-[#FF6B6B] text-white px-6 py-6 rounded-xl font-black hover:brightness-105 hover:-translate-y-1 shadow-[0px_4px_0px_0px_rgba(0,0,0,0.1)] transition-all text-xl">{player2}</button>
+                                </div>
+                             )}
+                          </div>
+                       </div>
+                    ) : (
+                       <div className="flex flex-col w-full h-full justify-center items-center gap-6 py-10">
+                          <h3 className="text-4xl font-extrabold text-[#4D96FF] mb-4">🏆 Fim de Jogo!</h3>
+                          
+                          <div className="flex justify-center items-center w-full max-w-3xl flex-wrap gap-4 px-2">
+                             <div className="flex-1 bg-gray-100 p-6 rounded-3xl text-center font-bold min-w-[140px] max-w-[200px]">
+                               <p className="text-gray-500 text-sm md:text-base mb-2 truncate" title={player1}>{player1}</p>
+                               <span className="text-4xl">{score1}</span>
+                             </div>
+                             
+                             <div className="text-2xl font-bold opacity-30 px-2">x</div>
+                             
+                             <div className="flex-1 bg-gray-100 p-6 rounded-3xl text-center font-bold min-w-[140px] max-w-[200px]">
+                               <p className="text-gray-500 text-sm md:text-base mb-2 truncate" title={player2}>{player2}</p>
+                               <span className="text-4xl">{score2}</span>
+                             </div>
+                             
+                             {gameMode === 'tres_pistas' && (
+                               <>
+                                 <div className="text-2xl font-bold opacity-30 px-2">x</div>
+                                 <div className="flex-1 bg-amber-100 border-2 border-amber-300 p-6 rounded-3xl text-center font-bold min-w-[140px] max-w-[200px] shadow-sm">
+                                   <p className="text-amber-700 text-sm md:text-base mb-2">Plateia</p>
+                                   <span className="text-4xl text-amber-700">{scorePlateia}</span>
+                                 </div>
+                               </>
+                             )}
+                          </div>
+                          
+                          <div className="mt-8 w-full">
+                             {gameMode === 'casal' ? (
+                                <div className="w-full max-w-3xl bg-white p-6 md:p-8 rounded-3xl shadow-sm border border-gray-100 text-left mt-4 mx-auto">
+                                   <h4 className="text-2xl font-extrabold text-[#2D2D2D] mb-4 flex items-center justify-center gap-3"><Sparkles className="w-8 h-8 text-[#4D96FF]" /> Veredito do Casal</h4>
+                                   {isGeneratingAnalysis ? (
+                                      <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                                         <Loader2 className="w-10 h-10 animate-spin mb-4 text-[#FF6B6B]" />
+                                         <p className="font-bold text-lg animate-pulse uppercase tracking-wider text-center">Analisando as escolhas de vocês...</p>
+                                      </div>
+                                   ) : (
+                                      <div className="markdown-body prose prose-lg max-w-none prose-p:text-lg prose-p:leading-relaxed prose-headings:text-[#2D2D2D]">
+                                         <ReactMarkdown>{casalAnalysis}</ReactMarkdown>
+                                      </div>
+                                   )}
+                                </div>
+                             ) : (
+                               (() => {
+                                const maxScore = Math.max(score1, score2, gameMode === 'tres_pistas' ? scorePlateia : -1);
+                                const winners = [];
+                                if (score1 === maxScore) winners.push(player1);
+                                if (score2 === maxScore) winners.push(player2);
+                                if (gameMode === 'tres_pistas' && scorePlateia === maxScore) winners.push('A Plateia');
+                                
+                                return (
+                                   <p className="text-2xl md:text-3xl font-bold uppercase tracking-wider text-[#FF6B6B] text-center drop-shadow-sm">
+                                      {winners.length > 1 ? `Empate Histórico entre ${winners.join(' e ')}! 🤝` : `${winners[0]} venceu!! 👑`}
+                                   </p>
+                                );
+                               })()
+                             )}
+                          </div>
+                          
+                          <button onClick={() => startGame(gameMode as any)} className="bg-[#2D2D2D] text-white mt-8 px-8 py-4 rounded-xl text-lg font-bold hover:bg-black hover:scale-105 transition-all shadow-lg">Jogar Novamente</button>
+                       </div>
+                    )}
+                 </div>
+               )}
              </div>
           ) : null}
         </div>
