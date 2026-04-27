@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { KeyboardEvent } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Sparkles, ArrowDown, Heart, Loader2, Settings, X, Key, Copy, Check, Volume2, Wand2, HeartPulse } from 'lucide-react';
+import { Sparkles, ArrowDown, Heart, Loader2, Settings, X, Key, Copy, Check, Volume2, Wand2, HeartPulse, Download, Mic, Square, Play, Pause } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 
@@ -62,7 +62,7 @@ const QUIZ_QUESTIONS = [
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'traducao' | 'analise' | 'quiz'>('traducao');
+  const [activeTab, setActiveTab] = useState<'traducao' | 'analise' | 'quiz' | 'passatempo'>('traducao');
   const [showSettings, setShowSettings] = useState(false);
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('entrelinhas_gemini_key') || '');
   const [openAIApiKey, setOpenAIApiKey] = useState(() => localStorage.getItem('entrelinhas_openai_key') || '');
@@ -88,8 +88,18 @@ export default function App() {
   const [relationshipContext, setRelationshipContext] = useState('');
   const [relationshipAnalysis, setRelationshipAnalysis] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [activeAudioText, setActiveAudioText] = useState('');
+  const [audioState, setAudioState] = useState<'idle' | 'generating' | 'playing' | 'paused'>('idle');
+  const [audioController, setAudioController] = useState<{ pause: () => void; resume: () => void; stop: () => void } | null>(null);
   const [copiedText, setCopiedText] = useState(false);
+
+  // Passatempo State
+  const [passatempoInput, setPassatempoInput] = useState('');
+  const [passatempoResult, setPassatempoResult] = useState('');
+  const [isGeneratingPassatempo, setIsGeneratingPassatempo] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<BlobPart[]>([]);
 
   // Quiz State
   const [quizStarted, setQuizStarted] = useState(false);
@@ -121,6 +131,30 @@ export default function App() {
   const [casalAnalysis, setCasalAnalysis] = useState('');
   const [isGeneratingAnalysis, setIsGeneratingAnalysis] = useState(false);
 
+  const [installPrompt, setInstallPrompt] = useState<any>(null);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    if (outcome === 'accepted') {
+      setInstallPrompt(null);
+    }
+  };
+
   const handleCopy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -144,9 +178,24 @@ export default function App() {
   };
 
   const playAudio = async (text: string) => {
-    if (isPlayingAudio) return;
+    if (activeAudioText === text && audioController) {
+      if (audioState === 'playing') {
+        audioController.pause();
+        setAudioState('paused');
+      } else if (audioState === 'paused') {
+        audioController.resume();
+        setAudioState('playing');
+      }
+      return;
+    }
+
+    if (audioController) {
+      audioController.stop();
+    }
+
+    setActiveAudioText(text);
+    setAudioState('generating');
     try {
-      setIsPlayingAudio(true);
       const modelDef = AVAILABLE_MODELS.find(m => m.id === selectedModel);
       
       if (modelDef?.provider === 'openai' && openAIApiKey) {
@@ -166,17 +215,28 @@ export default function App() {
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
-        audio.onended = () => setIsPlayingAudio(false);
-        audio.onerror = () => setIsPlayingAudio(false);
-        audio.play();
+        
+        const controller = {
+          pause: () => audio.pause(),
+          resume: () => audio.play(),
+          stop: () => {
+             audio.pause();
+             audio.currentTime = 0;
+             URL.revokeObjectURL(url);
+          }
+        };
+        
+        audio.onended = () => { setAudioState('idle'); setAudioController(null); };
+        audio.onerror = () => { setAudioState('idle'); setAudioController(null); };
+        
+        setAudioController(controller);
+        await audio.play();
+        setAudioState('playing');
       } else {
         const apiKey = geminiApiKey || process.env.GEMINI_API_KEY;
         if (!apiKey) throw new Error('API Key do Gemini não configurada.');
         const client = new GoogleGenAI({ apiKey });
-        let ttsModel = "gemini-2.5-flash";
-        if (!geminiApiKey) {
-          ttsModel = "gemini-3-flash-preview";
-        }
+        let ttsModel = "gemini-3.1-flash-tts-preview";
         
         try {
           const response = await client.models.generateContent({
@@ -192,27 +252,68 @@ export default function App() {
             }
           });
           
-          const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          console.log("TTS Response:", response);
+          
+          let base64Audio = null;
+          let mimeType = '';
+          const parts = response.candidates?.[0]?.content?.parts || [];
+          for (const part of parts) {
+            if (part.inlineData && part.inlineData.mimeType?.startsWith('audio/')) {
+              base64Audio = part.inlineData.data;
+              mimeType = part.inlineData.mimeType;
+              break;
+            }
+          }
+          
           if (!base64Audio) {
+            console.error("No audio part found in:", parts);
             throw new Error('Sem áudio na resposta.');
           }
-          // PCM 16-bit 24000Hz decoding
-          const binaryString = atob(base64Audio);
-          const float32Data = new Float32Array(binaryString.length / 2);
-          const dataView = new DataView(new ArrayBuffer(2));
-          for (let i = 0; i < float32Data.length; i++) {
-            dataView.setUint8(0, binaryString.charCodeAt(i * 2));
-            dataView.setUint8(1, binaryString.charCodeAt(i * 2 + 1));
-            float32Data[i] = dataView.getInt16(0, true) / 32768.0;
-          }
+          
+          // Decode audio. Gemini TTS might return audio/pcm;rate=24000 or audio/wav
           const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-          const buffer = audioCtx.createBuffer(1, float32Data.length, 24000);
-          buffer.getChannelData(0).set(float32Data);
+          let buffer: AudioBuffer;
+          
+          if (mimeType.includes('audio/wav') || mimeType.includes('audio/mp3') || mimeType.includes('audio/ogg')) {
+             // Decode standard formats using decodeAudioData
+             const binaryString = atob(base64Audio);
+             const len = binaryString.length;
+             const bytes = new Uint8Array(len);
+             for (let i = 0; i < len; i++) {
+                 bytes[i] = binaryString.charCodeAt(i);
+             }
+             buffer = await audioCtx.decodeAudioData(bytes.buffer);
+          } else {
+             // Fallback to PCM 16-bit 24000Hz decoding
+             const binaryString = atob(base64Audio);
+             const float32Data = new Float32Array(binaryString.length / 2);
+             const dataView = new DataView(new ArrayBuffer(2));
+             for (let i = 0; i < float32Data.length; i++) {
+               dataView.setUint8(0, binaryString.charCodeAt(i * 2));
+               dataView.setUint8(1, binaryString.charCodeAt(i * 2 + 1));
+               float32Data[i] = dataView.getInt16(0, true) / 32768.0;
+             }
+             buffer = audioCtx.createBuffer(1, float32Data.length, 24000);
+             buffer.getChannelData(0).set(float32Data);
+          }
           const source = audioCtx.createBufferSource();
           source.buffer = buffer;
           source.connect(audioCtx.destination);
-          source.onended = () => setIsPlayingAudio(false);
+          
+          const controller = {
+            pause: () => audioCtx.suspend(),
+            resume: () => audioCtx.resume(),
+            stop: () => {
+              source.stop();
+              audioCtx.close();
+            }
+          };
+
+          source.onended = () => { setAudioState('idle'); setAudioController(null); };
+          
+          setAudioController(controller);
           source.start();
+          setAudioState('playing');
         } catch(apiErr: any) {
              if (apiErr?.status === 403 || apiErr?.message?.includes('PERMISSION_DENIED') || apiErr?.message?.includes('403') || apiErr?.message?.includes('NOT_FOUND')) {
                 throw new Error('Sem permissão para este modelo ou versão de áudio. Por favor, adicione SUA PRÓPRIA API KEY na engrenagem de configurações.');
@@ -225,9 +326,16 @@ export default function App() {
       // Fallback nativo
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'pt-BR';
-      utterance.onend = () => setIsPlayingAudio(false);
-      utterance.onerror = () => setIsPlayingAudio(false);
+      const controller = {
+        pause: () => window.speechSynthesis.pause(),
+        resume: () => window.speechSynthesis.resume(),
+        stop: () => window.speechSynthesis.cancel()
+      };
+      utterance.onend = () => { setAudioState('idle'); setAudioController(null); };
+      utterance.onerror = () => { setAudioState('idle'); setAudioController(null); };
+      setAudioController(controller);
       window.speechSynthesis.speak(utterance);
+      setAudioState('playing');
     }
   };
 
@@ -305,17 +413,22 @@ export default function App() {
     try {
       const text = await callAI(
         inputPhrase,
-        `Você é um psicólogo especialista em empatia, comunicação não-violenta e análise de discurso. 
-Sua tarefa é receber frases que pessoas dizem (muitas vezes no calor do momento, de forma passivo-agressiva, ou ocultando sentimentos por medo da vulnerabilidade) e traduzi-las para as SUAS VERDADEIRAS INTENÇÕES e necessidades emocionais.
-Seja direto, profundo, compassivo e maduro.
-Retorne APENAS a frase traduzida na primeira pessoa do singular (ex: "Eu me sinto... e preciso de..."). Não inclua explicações ou introduções adicionais.`,
-        0.7
+        `Você é um terapeuta compassivo, acolhedor e especialista em empatia e comunicação não-violenta.
+O usuário vai trazer uma frase dita (ou que ele pensou em dizer) no calor do momento, muitas vezes cheia de passivo-agressividade ou que mascara as verdadeiras emoções (medo, vulnerabilidade).
+
+Sua tarefa:
+1. **Decifre a frase**: Mostre com gentileza qual é a *verdadeira intenção e necessidade emocional* por baixo daquela fala.
+2. **Atue como apoio emocional e converse**: Importe-se verdadeiramente com a pessoa. Valide os sentimentos dela, diga que é perfeitamente compreensível se sentir assim frente a problemas e tente ajudá-la a entender o porquê dessas reações.
+3. **Ofereça conselhos psicológicos práticos e empáticos**: Dê passos, dicas de como a pessoa poderia comunicar o que sente melhor e de forma mais saudável da próxima vez.
+
+Seja extremamente natural, conversacional, usando voz de terapeuta atencioso, como se estivessem em um consultório ou numa conversa profunda entre pessoas que se importam. Formate em Markdown.`,
+        0.8
       );
 
       if (text) {
         setTrueIntention(text.trim());
       } else {
-        setError('Não foi possível traduzir a intenção desta vez. Tente novamente.');
+        setError('Não foi possível realizar a análise desta vez. Tente novamente.');
       }
     } catch (err: any) {
       console.error('Translation error:', err);
@@ -412,6 +525,112 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
        setError(err.message || 'Ocorreu um erro ao conectar com a inteligência artificial.');
     } finally {
       setIsGeneratingQuizResult(false);
+    }
+  };
+
+  const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.split(',')[1];
+        resolve(base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const handlePassatempoSubmit = async (audioBlob?: Blob) => {
+    if (!passatempoInput.trim() && !audioBlob) return;
+
+    setIsGeneratingPassatempo(true);
+    setError('');
+    setPassatempoResult('');
+
+    try {
+      const apiKey = geminiApiKey || process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new Error('API Key do Gemini não configurada.');
+      const client = new GoogleGenAI({ apiKey });
+      
+      const contents: any[] = [];
+      if (passatempoInput.trim()) {
+        contents.push({ text: passatempoInput });
+      }
+      
+      if (audioBlob) {
+        const base64 = await blobToBase64(audioBlob);
+        contents.push({
+          inlineData: {
+            mimeType: audioBlob.type || 'audio/webm',
+            data: base64
+          }
+        });
+      }
+
+      const response = await client.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: { parts: contents },
+        config: {
+          tools: [{ googleSearch: {} }],
+          systemInstruction: `Você é uma IA amigável e especialista em lazer e entretenimento para casais ou indivíduos.
+Seu objetivo é dar uma sugestão incrivelmente assertiva sobre "o que fazer hoje".
+A pessoa pode falar sobre o que quer comer, se quer ficar em casa, se quer assistir a algo, quais os gostos do casal, ou pedir ideias do nada.
+Se a entrada for em áudio, escute com atenção!
+Use a pesquisa do Google para ver restaurantes reais, filmes em cartaz, clima atual (se tiverem falado o local) ou eventos.
+Dê recomendações com entusiasmo, separadas em categorias se necessário (ex: 🍽️ Para comer, 🍿 Para assistir, 🛋️ Para relaxar). Formate em Markdown.
+MUITO IMPORTANTE: Para CADA sugestão, traga OBRIGATORIAMENTE uma imagem representativa usando a sintaxe Markdown de imagem. 
+Se você tiver um link real de imagem via pesquisa Google do local, comida ou filme, use-o! Caso contrário, gere uma imagem usando: ![alt text](https://image.pollinations.ai/prompt/UMA_DESCRICAO_DETALHADA_EM_INGLES_AQUI?width=800&height=400&nologo=true)
+Seja visual, prático, conciso e super amigável!`,
+          temperature: 0.8,
+        },
+      });
+
+      if (response.text) {
+        setPassatempoResult(response.text.trim());
+      } else {
+        setError('Não foi possível gerar uma sugestão desta vez.');
+      }
+    } catch (err: any) {
+      console.error('Passatempo error:', err);
+      // Fallback
+      setError(err.message || 'Ocorreu um erro ao conectar com o Gemini 2.5 Flash.');
+    } finally {
+      setIsGeneratingPassatempo(false);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
+        handlePassatempoSubmit(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err: any) {
+      console.error("Recording error:", err);
+      setError("Não foi possível acessar o microfone.");
     }
   };
 
@@ -579,6 +798,30 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
       }
   };
 
+  const renderAudioButton = (text: string, colorClass: string) => {
+    const isActive = activeAudioText === text;
+    const isGenerating = isActive && audioState === 'generating';
+    const isPlaying = isActive && audioState === 'playing';
+    const isPaused = isActive && audioState === 'paused';
+
+    return (
+      <button
+        onClick={() => playAudio(text)}
+        disabled={isGenerating}
+        className={`flex items-center gap-2 ${colorClass} px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed`}
+      >
+        {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> :
+         isPlaying ? <Pause className="w-4 h-4" /> :
+         isPaused ? <Play className="w-4 h-4" /> :
+         <Volume2 className="w-4 h-4" />}
+        {isGenerating ? 'Prepara...' :
+         isPlaying ? 'Pausar' :
+         isPaused ? 'Retomar' :
+         'Ouvir'}
+      </button>
+    );
+  };
+
   return (
     <div className="min-h-screen py-16 px-6 md:px-12 max-w-4xl mx-auto flex flex-col pt-24 font-sans text-[#2D2D2D]">
       <header className="mb-12 flex justify-between items-center text-center md:text-left">
@@ -593,19 +836,31 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
           </div>
           <p className="text-[#666] text-lg font-semibold tracking-wide max-w-xl mt-4 min-h-[56px]">
             {activeTab === 'traducao' 
-              ? 'Transforme palavras ditas no calor da emoção naquilo que você realmente queria dizer.'
+              ? 'Desabafe aquela frase dita no calor da emoção e converse com um terapeuta acolhedor para entender seus sentimentos reais.'
               : activeTab === 'analise'
               ? 'Descreva uma situação ou briga e receba uma análise racional, imparcial e construtiva.'
               : 'Responda o quiz para descobrir seu par ideal e as maiores ciladas para o seu estilo de amar.'}
           </p>
         </div>
-        <button 
-          onClick={() => setShowSettings(true)}
-          className="p-3 bg-[#FFD93D] border-2 border-[#2D2D2D] rounded-xl shadow-[4px_4px_0px_0px_#2D2D2D] hover:-translate-y-1 hover:shadow-[6px_6px_0px_0px_#2D2D2D] transition-all"
-          title="Configurações de API e IA"
-        >
-          <Settings className="w-8 h-8 text-[#2D2D2D]" />
-        </button>
+        <div className="flex gap-4 items-center">
+          {installPrompt && (
+            <button
+              onClick={handleInstallClick}
+              className="flex items-center gap-2 px-6 py-3 bg-[#6BCB77] border-2 border-[#2D2D2D] rounded-xl shadow-[4px_4px_0px_0px_#2D2D2D] hover:-translate-y-1 hover:shadow-[6px_6px_0px_0px_#2D2D2D] transition-all font-bold text-[#2D2D2D]"
+              title="Instalar App"
+            >
+              <Download className="w-6 h-6" />
+              <span className="hidden sm:inline">Instalar</span>
+            </button>
+          )}
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-3 bg-[#FFD93D] border-2 border-[#2D2D2D] rounded-xl shadow-[4px_4px_0px_0px_#2D2D2D] hover:-translate-y-1 hover:shadow-[6px_6px_0px_0px_#2D2D2D] transition-all"
+            title="Configurações de API e IA"
+          >
+            <Settings className="w-8 h-8 text-[#2D2D2D]" />
+          </button>
+        </div>
       </header>
 
       <main className="flex-1 flex flex-col gap-6">
@@ -618,7 +873,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                 : 'bg-white text-[#2D2D2D] border-2 border-[#2D2D2D] hover:bg-gray-50'
             }`}
           >
-            Tradução
+            Sessão de Terapia
           </button>
           <button
             onClick={() => setActiveTab('analise')}
@@ -640,6 +895,16 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
           >
             Quiz/Jogos
           </button>
+          <button
+            onClick={() => setActiveTab('passatempo')}
+            className={`px-6 py-2 rounded-full font-bold tracking-wider text-sm transition-all ${
+              activeTab === 'passatempo' 
+                ? 'bg-[#FF6B6B] text-white shadow-md' 
+                : 'bg-white text-[#2D2D2D] border-2 border-[#2D2D2D] hover:bg-gray-50'
+            }`}
+          >
+            Passatempo (O que fazer?)
+          </button>
         </div>
 
         <div className="bg-white p-8 rounded-[40px] shadow-[12px_12px_0px_0px_#4D96FF] border-2 border-[#4D96FF] transition-all focus-within:shadow-[16px_16px_0px_0px_#4D96FF] focus-within:-translate-y-1">
@@ -647,7 +912,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
             <>
               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-4">
                 <label htmlFor="phrase" className="inline-block px-4 py-1 bg-[#FFD93D] rounded-full text-xs font-bold uppercase tracking-wider w-fit">
-                  O que você disse
+                  Frase ou Desabafo
                 </label>
                 <button 
                   onClick={generateRandomPhrase}
@@ -661,13 +926,13 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                 value={inputPhrase}
                 onChange={(e) => setInputPhrase(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ex: 'Faz o que você quiser, não me importo mais.'"
+                placeholder="Ex: 'Faz o que você quiser, não me importo mais.' ou conte como você se sente..."
                 className="w-full resize-none text-2xl md:text-3xl font-extrabold leading-tight mb-4 text-[#2D2D2D] placeholder:text-[#999] bg-transparent border-none outline-none focus:ring-0 p-2 min-h-[140px]"
                 disabled={isTranslating}
               />
               
               <div className="flex flex-col sm:flex-row justify-between items-center sm:items-end mt-2 gap-4">
-                <span className="text-xs text-[#999] px-2 font-semibold hidden sm:inline-block">Pressione Enter para traduzir</span>
+                <span className="text-xs text-[#999] px-2 font-semibold hidden sm:inline-block">Pressione Enter para enviar</span>
                 <button
                   onClick={handleTranslate}
                   disabled={isTranslating || !inputPhrase.trim()}
@@ -676,12 +941,12 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                   {isTranslating ? (
                     <>
                       <Loader2 className="w-5 h-5 animate-spin" />
-                      Traduzindo
+                      Ouvindo...
                     </>
                   ) : (
                     <>
                       <Sparkles className="w-5 h-5" />
-                      Descobrir intenção
+                      Iniciar Sessão
                     </>
                   )}
                 </button>
@@ -748,7 +1013,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                        </button>
 
                        <button
-                         onClick={() => setGameStep('setup') || setGameMode('trivia')}
+                         onClick={() => { setGameStep('setup'); setGameMode('trivia'); }}
                          className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#4D96FF] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#4D96FF] hover:-translate-y-1"
                        >
                           <Wand2 className="w-8 h-8 text-[#4D96FF] mb-2" />
@@ -757,7 +1022,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                        </button>
 
                        <button
-                         onClick={() => setGameStep('setup') || setGameMode('tres_pistas')}
+                         onClick={() => { setGameStep('setup'); setGameMode('tres_pistas'); }}
                          className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#FFD93D] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#FFD93D] hover:-translate-y-1"
                        >
                           <Sparkles className="w-8 h-8 text-[#FFD93D] mb-2" />
@@ -766,7 +1031,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                        </button>
 
                        <button
-                         onClick={() => setGameStep('setup') || setGameMode('casal')}
+                         onClick={() => { setGameStep('setup'); setGameMode('casal'); }}
                          className="flex flex-col items-center justify-center bg-white border-4 border-[#2D2D2D]/10 hover:border-[#6BCB77] p-6 rounded-2xl transition-all shadow-[4px_4px_0px_0px_rgba(45,45,45,0.1)] hover:shadow-[4px_4px_0px_0px_#6BCB77] hover:-translate-y-1"
                        >
                           <HeartPulse className="w-8 h-8 text-[#6BCB77] mb-2" />
@@ -818,14 +1083,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                           {copiedText ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                           {copiedText ? 'Copiado!' : 'Copiar'}
                         </button>
-                        <button
-                          onClick={() => playAudio(quizResult)}
-                          disabled={isPlayingAudio}
-                          className="flex items-center gap-2 bg-[#2D2D2D]/10 hover:bg-[#2D2D2D]/20 text-[#2D2D2D] px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {isPlayingAudio ? <Loader2 className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
-                          {isPlayingAudio ? 'Reproduzindo...' : 'Ouvir'}
-                        </button>
+                        {renderAudioButton(quizResult, 'bg-[#2D2D2D]/10 hover:bg-[#2D2D2D]/20 text-[#2D2D2D]')}
                         <button
                           onClick={() => { setQuizResult(''); setQuizStarted(false); setCurrentQuestionIndex(0); setQuizAnswers([]); }}
                           className="ml-auto flex items-center gap-2 bg-[#2D2D2D] hover:bg-[#444] text-white px-4 py-2 rounded-xl text-sm font-bold transition-all"
@@ -1041,6 +1299,69 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                  </div>
                )}
              </div>
+          ) : activeTab === 'passatempo' ? (
+            <>
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-4">
+                <label htmlFor="passatempo" className="inline-block px-4 py-1 bg-[#4D96FF] text-white rounded-full text-xs font-bold uppercase tracking-wider w-fit shadow-sm">
+                  O que vamos fazer hoje?
+                </label>
+              </div>
+              
+              <div className="flex flex-col gap-4 relative">
+                 <textarea
+                  id="passatempo"
+                  value={passatempoInput}
+                  onChange={(e) => setPassatempoInput(e.target.value)}
+                  placeholder="Escreva do que vocês gostam, se querem comer ou assistir algo (ou grave um áudio)..."
+                  className="w-full resize-none text-xl font-semibold leading-relaxed text-[#2D2D2D] placeholder:text-[#999] bg-gray-50 border-2 border-gray-100 focus:border-[#4D96FF] focus:bg-white rounded-3xl outline-none p-6 pt-6 min-h-[160px] transition-all pb-20 shadow-inner"
+                  disabled={isGeneratingPassatempo || isRecording}
+                />
+                
+                <div className="absolute bottom-6 right-6 flex gap-2">
+                   {!isRecording ? (
+                     <button
+                       type="button"
+                       onClick={startRecording}
+                       disabled={isGeneratingPassatempo}
+                       className="p-4 bg-gray-200 hover:bg-[#FF6B6B] hover:text-white text-[#2D2D2D] rounded-2xl transition-all shadow-sm group"
+                       title="Usar microfone"
+                     >
+                       <Mic className="w-6 h-6 group-hover:scale-110 transition-transform" />
+                     </button>
+                   ) : (
+                     <button
+                       type="button"
+                       onClick={stopRecording}
+                       className="p-4 bg-[#FF6B6B] text-white rounded-2xl transition-all shadow-md animate-pulse flex gap-3 items-center"
+                       title="Parar e Enviar"
+                     >
+                       <Square className="w-5 h-5 fill-current" />
+                       <span className="text-sm font-bold pr-2 tracking-wide uppercase">Gravando (clique para parar)</span>
+                     </button>
+                   )}
+                </div>
+              </div>
+              
+              <div className="flex flex-col sm:flex-row justify-end items-center sm:items-end mt-4 gap-4">
+                <button
+                  onClick={() => handlePassatempoSubmit()}
+                  disabled={isGeneratingPassatempo || (!passatempoInput.trim() && !isRecording)}
+                  className="w-full sm:w-auto bg-[#FFD93D] text-[#2D2D2D] px-8 py-4 sm:py-5 rounded-2xl font-bold text-lg sm:text-xl shadow-[4px_4px_0px_0px_#2D2D2D] hover:shadow-[6px_6px_0px_0px_#2D2D2D] hover:-translate-y-1 transition-all flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed border-2 border-[#2D2D2D]"
+                >
+                  {isGeneratingPassatempo ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Pensando...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-5 h-5" />
+                      Sugerir Passatempo!
+                    </>
+                  )}
+                </button>
+              </div>
+            </>
           ) : null}
         </div>
 
@@ -1074,13 +1395,15 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                 </div>
                 
                 <h2 className="px-4 py-1 bg-white inline-block w-fit rounded-full text-xs font-bold uppercase tracking-wider mb-6 text-[#2D2D2D]">
-                  A intenção real
+                  Sua Sessão
                 </h2>
-                <p className="text-3xl md:text-4xl font-extrabold text-white leading-tight relative z-10 drop-shadow-md mb-6">
-                  "{trueIntention}"
-                </p>
+                <div className="prose prose-lg text-white relative z-10 font-medium leading-relaxed max-w-none prose-headings:text-white prose-headings:font-extrabold prose-headings:mb-2 prose-p:mb-4 prose-strong:font-extrabold prose-strong:text-[#2D2D2D] prose-li:text-white mb-6">
+                  <ReactMarkdown>
+                    {trueIntention}
+                  </ReactMarkdown>
+                </div>
                 
-                <div className="flex items-center gap-3 relative z-10">
+                <div className="flex items-center gap-3 relative z-10 mt-auto pt-4 border-t-2 border-white/20">
                   <button
                     onClick={() => handleCopy(trueIntention)}
                     className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white px-4 py-2 rounded-xl text-sm font-bold transition-all"
@@ -1088,14 +1411,7 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                     {copiedText ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                     {copiedText ? 'Copiado!' : 'Copiar'}
                   </button>
-                  <button
-                    onClick={() => playAudio(trueIntention)}
-                    disabled={isPlayingAudio}
-                    className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isPlayingAudio ? <Loader2 className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
-                    {isPlayingAudio ? 'Reproduzindo...' : 'Ouvir'}
-                  </button>
+                  {renderAudioButton(trueIntention, 'bg-white/20 hover:bg-white/30 text-white')}
                 </div>
               </div>
             </motion.div>
@@ -1135,14 +1451,46 @@ Use emojis. Formate tudo em Markdown. Deixe a leitura dinâmica, madura e engaja
                     {copiedText ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                     {copiedText ? 'Copiado!' : 'Copiar'}
                   </button>
+                  {renderAudioButton(relationshipAnalysis, 'bg-[#2D2D2D]/10 hover:bg-[#2D2D2D]/20 text-[#2D2D2D]')}
+                </div>
+              </div>
+            </motion.div>
+          )}
+          {activeTab === 'passatempo' && passatempoResult && (
+             <motion.div
+              key="passatempo-result"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              className="mt-6 relative"
+            >
+              <div className="absolute left-1/2 -top-8 -translate-x-1/2 text-[#2D2D2D]">
+                <ArrowDown className="w-8 h-8 font-bold" />
+              </div>
+              
+              <div className="bg-[#4D96FF] p-8 md:p-10 rounded-[40px] shadow-[12px_12px_0px_0px_#2D2D2D] border-2 border-[#2D2D2D] relative flex flex-col justify-center text-white">
+                <div className="absolute top-0 right-0 p-8 opacity-10 text-white">
+                  <Sparkles className="w-32 h-32" />
+                </div>
+                
+                <h2 className="px-4 py-1 bg-[#2D2D2D] inline-block w-fit rounded-full text-xs font-bold uppercase tracking-wider mb-6 text-white">
+                  Sugestão para hoje
+                </h2>
+                <div className="prose prose-lg text-white relative z-10 font-medium leading-relaxed max-w-none prose-headings:text-white prose-headings:font-extrabold prose-headings:mb-2 prose-p:mb-6 prose-strong:font-extrabold prose-strong:text-[#FFD93D] prose-li:text-white prose-img:rounded-3xl prose-img:w-full prose-img:max-h-80 prose-img:object-cover prose-img:shadow-xl prose-img:my-6 mb-6">
+                  <ReactMarkdown>
+                    {passatempoResult}
+                  </ReactMarkdown>
+                </div>
+
+                <div className="flex items-center gap-3 relative z-10 mt-auto pt-4 border-t-2 border-white/20">
                   <button
-                    onClick={() => playAudio(relationshipAnalysis)}
-                    disabled={isPlayingAudio}
-                    className="flex items-center gap-2 bg-[#2D2D2D]/10 hover:bg-[#2D2D2D]/20 text-[#2D2D2D] px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={() => handleCopy(passatempoResult)}
+                    className="flex items-center gap-2 bg-black/20 hover:bg-black/30 text-white px-4 py-2 rounded-xl text-sm font-bold transition-all"
                   >
-                    {isPlayingAudio ? <Loader2 className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />}
-                    {isPlayingAudio ? 'Reproduzindo...' : 'Ouvir'}
+                    {copiedText ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    {copiedText ? 'Copiado!' : 'Copiar'}
                   </button>
+                  {renderAudioButton(passatempoResult, 'bg-black/20 hover:bg-black/30 text-white')}
                 </div>
               </div>
             </motion.div>
